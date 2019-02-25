@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# Copyright (c) Facebook, Inc. and its affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 import logging
 import math
@@ -28,8 +26,21 @@ import parlai.mturk.core.shared_utils as shared_utils
 # Timeout before cancelling a world start
 WORLD_START_TIMEOUT = 11
 
-# Multiplier to apply when creating hits to ensure worker availibility
-HIT_MULT = 1.5
+# Multiplier to apply when creating hits to ensure worker availibility. As the
+# number of HITs increases, this decreases
+HIT_MULT_SCALE = [
+    # At more than 1000 HITS, most workers will become 'regulars', and we can
+    # discount the occasional disconnects from being a large portion of workers
+    (1000, 1.05),
+    # Between 1000 and 100 HITs, disconnecting workers take a bit more of an
+    # impact, so we scale a bit higher
+    (100, 1.1),
+    # Under 100 hits, we should prepare for a larger proportion of workers that
+    # try
+    (10, 1.25),
+    # Under 10 hits, we need more to ensure one worker doesn't take all
+    (0, 1.5),
+]
 
 # 6 minute timeout to ensure only one thread updates the time logs.
 # Those update once daily in a 3 minute window
@@ -116,8 +127,16 @@ class MTurkManager():
         self.agent_pool_change_condition = threading.Condition()
         self.onboard_function = None
         self.num_conversations = opt['num_conversations']
+
+        # Determine the correct number of hits to be launching
+        base_required_hits = self.num_conversations * len(self.mturk_agent_ids)
+        for hit_amount, hit_mult in HIT_MULT_SCALE:
+            if base_required_hits >= hit_amount:
+                self.hit_mult = hit_mult
+                break
+
         self.required_hits = math.ceil(
-            self.num_conversations * len(self.mturk_agent_ids) * HIT_MULT
+            base_required_hits * self.hit_mult
         )
         self.minimum_messages = opt.get('min_messages', 0)
         self.auto_approve_delay = \
@@ -128,12 +147,13 @@ class MTurkManager():
         self.is_test = is_test
         self.is_unique = False
         self.max_hits_per_worker = opt.get('max_hits_per_worker', 0)
-        self._init_logging_config()
         self.is_shutdown = False
         self.use_db = use_db  # TODO enable always DB integration is complete
         self.db_logger = None
-        self.logging_permitted = False
+        self.logging_permitted = False  # Enables logging to parl.ai
         self.task_state = self.STATE_CREATED
+        self._init_logging_config()
+        self._assert_opts()
 
     @staticmethod
     def make_taskless_instance(is_sandbox=False):
@@ -148,12 +168,38 @@ class MTurkManager():
             'is_debug': False,
             'log_level': 30,
         }
-        manager = MTurkManager(opt, [])
+        manager = MTurkManager(opt, [], use_db=True)
         manager.is_shutdown = True
         mturk_utils.setup_aws_credentials()
         return manager
 
     # Helpers and internal manager methods #
+
+    def _assert_opts(self):
+        """Manages ensuring everything about the passed in options make sense
+        in that they don't conflict in some way or another"""
+        if self.opt.get('allow_reviews') and len(self.mturk_agent_ids) != 2:
+            shared_utils.print_and_log(
+                logging.WARN,
+                '[OPT CONFIGURATION ISSUE] '
+                'allow_reviews is currently only supported on 2 person tasks, '
+                'overriding this value to false.',
+                should_print=True
+            )
+            self.opt['allow_reviews'] = False
+        if self.opt.get('frontend_version', 0) < 1:
+            # Ensure no react only features have been set
+            features = ['frame_height', 'allow_reviews', 'block_mobile']
+            for feat in features:
+                if self.opt.get(feat) is not None:
+                    shared_utils.print_and_log(
+                        logging.WARN,
+                        '[OPT CONFIGURATION ISSUE] '
+                        '{} only works when using the react frontend '
+                        '(frontend_version >= 1), so this option will be '
+                        'ignored'.format(feat),
+                        should_print=True
+                    )
 
     def _init_state(self):
         """Initialize everything in the worker, task, and thread states"""
@@ -180,8 +226,11 @@ class MTurkManager():
 
     def _init_logging_config(self):
         """Initialize logging settings from the opt"""
-        shared_utils.set_is_debug(self.opt['is_debug'])
-        shared_utils.set_log_level(self.opt['log_level'])
+        if self.use_db and not self.opt['is_debug']:
+            shared_utils.disable_logging()
+        else:
+            shared_utils.set_is_debug(self.opt['is_debug'])
+            shared_utils.set_log_level(self.opt['log_level'])
 
     def _logging_permission_check(self):
         if self.is_test:
@@ -248,8 +297,15 @@ class MTurkManager():
             target=update_status, name='Hit-Status-Thread', daemon=True)
         hit_status_thread.start()
 
+    def _should_use_time_logs(self):
+        # Used to ensure time logs are properly tracked. Can be overridden for
+        # testing
+        return self.is_sandbox
+
     def _reset_time_logs(self, init_load=False, force=False):
         # Uses a weak lock file to try to prevent clobbering between threads
+        if not self._should_use_time_logs():
+            return  # sandbox doesn't check logs
         file_path = os.path.join(parent_dir, TIME_LOGS_FILE_NAME)
         file_lock = os.path.join(parent_dir, TIME_LOGS_FILE_LOCK)
         with LockFile(file_lock) as _lock_file:
@@ -278,6 +334,8 @@ class MTurkManager():
                             pickle.HIGHEST_PROTOCOL)
 
     def _log_working_time(self, mturk_agent):
+        if not self._should_use_time_logs():
+            return  # sandbox does not log working time
         additional_time = time.time() - mturk_agent.creation_time
         worker_id = mturk_agent.worker_id
         file_path = os.path.join(parent_dir, TIME_LOGS_FILE_NAME)
@@ -540,6 +598,12 @@ class MTurkManager():
             agent = self.worker_manager._get_agent(worker_id, assign_id)
             agent.log_reconnect()
             agent.alived = True
+            if agent.conversation_id is not None and \
+                    conversation_id is not None:
+                # agent.conversation_id is None is used in testing.
+                # conversation_id is None on a fresh reconnect event, where
+                # we need to restore state somehow and shouldn't just inherit
+                conversation_id = agent.conversation_id
             if agent.get_status() == AssignState.STATUS_NONE:
                 # See if assigned an onboarding world, update state if so
                 if self.is_onboarding_world(conversation_id):
@@ -801,6 +865,7 @@ class MTurkManager():
                 'static': [],
                 'components': [],
                 'css': [],
+                'needs_build': None,
             }
         if not task_directory_path:
             task_directory_path = os.path.join(
@@ -815,6 +880,11 @@ class MTurkManager():
         try:
             frontend_contents = os.listdir(
                 os.path.join(task_directory_path, 'frontend'))
+            if 'package.json' in frontend_contents:
+                # We take a package file to mean that this component will
+                # need to be built separately before importing
+                self.task_files_to_copy['needs_build'] = \
+                    os.path.join(task_directory_path, 'frontend')
             for dir in frontend_contents:
                 if dir in self.task_files_to_copy:
                     for file_name in os.listdir(os.path.join(
@@ -846,7 +916,7 @@ class MTurkManager():
                 'Enough HITs will be created to fulfill {} times the '
                 'number of conversations requested, extra HITs will be expired'
                 ' once the desired conversations {}.'
-                ''.format(HIT_MULT, fin_word),
+                ''.format(self.hit_mult, fin_word),
                 should_print=True,
             )
         else:
@@ -855,7 +925,7 @@ class MTurkManager():
                 'Enough HITs will be launched over time '
                 'up to a max of {} times the amount requested until the '
                 'desired number of conversations {}.'
-                ''.format(HIT_MULT, fin_word),
+                ''.format(self.hit_mult, fin_word),
                 should_print=True,
             )
         input('Please press Enter to continue... ')
@@ -892,7 +962,7 @@ class MTurkManager():
         if ((not self.opt['is_sandbox']) and
                 (total_cost > 100 or self.opt['reward'] > 1)):
             confirm_string = '$%.2f' % total_cost
-            expected_cost = total_cost / HIT_MULT
+            expected_cost = total_cost / self.hit_mult
             expected_string = '$%.2f' % expected_cost
             shared_utils.print_and_log(
                 logging.INFO,
@@ -942,6 +1012,7 @@ class MTurkManager():
         self.is_unique = self.opt['unique_worker']
         self.max_hits_per_worker = self.opt.get('max_hits_per_worker', 0)
         mturk_utils.create_hit_config(
+            opt=self.opt,
             task_description=self.opt['task_description'],
             unique_worker=self.is_unique,
             is_sandbox=self.opt['is_sandbox']
@@ -1503,6 +1574,7 @@ class MTurkManager():
         for _i in range(num_hits):
             mturk_page_url, hit_id, mturk_response = \
                 mturk_utils.create_hit_with_hit_type(
+                    opt=self.opt,
                     page_url=mturk_chat_url,
                     hit_type_id=hit_type_id,
                     num_assignments=1,

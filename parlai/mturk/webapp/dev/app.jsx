@@ -1,13 +1,30 @@
+/*
+ * Copyright (c) 2017-present, Facebook, Inc.
+ * All rights reserved.
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree. An additional grant
+ * of patent rights can be found in the PATENTS file in the same directory.
+ */
+
 import React from 'react';
 import ReactDOM from 'react-dom';
 import {ToggleButtonGroup, ToggleButton, Button, FormControl,
-  ButtonGroup, ButtonToolbar, Panel, Table, Modal, InputGroup} from 'react-bootstrap';
+  ButtonGroup, ButtonToolbar, Panel, Table, Modal, InputGroup,
+  Nav, NavItem} from 'react-bootstrap';
+import {BaseFrontend, getCorrectComponent, setCustomComponents} from './task_components/core_components.jsx';
 import ReactTable from "react-table";
 import 'react-table/react-table.css';
 import 'fetch';
+import $ from 'jquery';
+
+// TODO split components into other files, this app is getting complex
+
+// Init display components
+setCustomComponents({});
 
 var AppURLStates = Object.freeze({
-  init:0, tasks:1, unsupported:2, runs:3, workers:4, assignments:5,
+  init:0, home:1, unsupported:2, runs:3, workers:4, assignments:5, tasks: 6,
+  review: 7,
 });
 
 function convert_time(timestamp){
@@ -50,17 +67,42 @@ function postData(url = ``, data = {}) {
   });
 }
 
+// Custom message component shows context if it exists:
 class ChatMessage extends React.Component {
-  constructor(props) {
-    super(props);
-  }
-
   render() {
-    var float_loc = 'left';
-    var alert_class = 'alert-warning';
+    if (this.props.agent_id == 'persona' || this.props.agent_id == 'setting') {
+      return (
+        <div className={"row"} style={{'marginLeft': '0', 'marginRight': '0'}}>
+          <div
+            className={"alert " + 'alert-info'} role="alert"
+            style={{'float': 'left', 'display': 'table'}}>
+            <span style={{'fontSize': '16px'}}>
+              <b>{this.props.agent_id}</b>: {this.props.context}
+              {context}
+            </span>
+          </div>
+        </div>
+      );
+    }
+    let float_loc = 'left';
+    let alert_class = 'alert-warning';
     if (this.props.is_self) {
       float_loc = 'right';
       alert_class = 'alert-info';
+    }
+    let context = null;
+    let duration = null;
+    if (this.props.context !== undefined && this.props.context.length > 0) {
+      context = <span><br /><b>Action: </b><i>{this.props.context}</i></span>;
+    }
+    if (this.props.duration !== undefined) {
+      let duration_seconds = Math.floor(this.props.duration / 1000) % 60;
+      let duration_minutes = Math.floor(this.props.duration / 60000);
+      let min_text = duration_minutes > 0 ? duration_minutes + ' min' : '';
+      let sec_text = duration_seconds > 0 ? duration_seconds + ' sec' : '';
+      duration = <small>
+        <br /><i>Duration: </i>{min_text + ' ' + sec_text}
+      </small>;
     }
     return (
       <div className={"row"} style={{'marginLeft': '0', 'marginRight': '0'}}>
@@ -69,6 +111,8 @@ class ChatMessage extends React.Component {
           style={{'float': float_loc, 'display': 'table'}}>
           <span style={{'fontSize': '16px'}}>
             <b>{this.props.agent_id}</b>: {this.props.message}
+            {context}
+            {duration}
           </span>
         </div>
       </div>
@@ -77,31 +121,13 @@ class ChatMessage extends React.Component {
 }
 
 class ChatDisplay extends React.Component {
-  constructor(props) {
-    super(props);
-  }
-
-  makeMessages() {
-    var agent_id = this.props.agent_id;
-    var messages = this.props.messages;
-    return messages.map(
-      m => <ChatMessage
-        key={m.message_id}
-        is_self={m.id == agent_id}
-        agent_id={m.id}
-        message={m.text}
-        message_id={m.id}/>
-    );
-  }
-
   render() {
-    var messages = this.makeMessages();
     var display_text = this.props.is_onboarding ? 'Onboarding' : 'Task';
+    let XMessageList = getCorrectComponent('XMessageList', this.props.agent_id);
     return (
       <Panel
         id="message_display_div"
         bsStyle="info"
-        style={{float: 'right', 'width': '58%'}}
         defaultExpanded>
         <Panel.Heading>
           <Panel.Title componentClass="h3" toggle>
@@ -110,9 +136,13 @@ class ChatDisplay extends React.Component {
         </Panel.Heading>
         <Panel.Collapse>
           <Panel.Body style={{maxHeight: '600px', overflow: 'scroll'}}>
-            <div id="message_thread">
-              {messages}
-            </div>
+            <XMessageList
+              v_id={this.props.agent_id}
+              messages={this.props.messages}
+              agent_id={this.props.agent_id}
+              is_review={true}
+              onClickMessage={this.props.onUpdateContext}
+            />
           </Panel.Body>
         </Panel.Collapse>
       </Panel>
@@ -132,6 +162,18 @@ class NavLink extends React.Component {
           {this.props.children}
         </a>
       );
+    } else if (this.props.type == 'run_review') {
+      return (
+        <a href={'/app/review/run/' + this.props.target}>
+          {this.props.children}
+        </a>
+      );
+    } else if (this.props.type == 'task_review') {
+      return (
+        <a href={'/app/review/task/' + this.props.target}>
+          {this.props.children}
+        </a>
+      );
     } else if (this.props.type == 'worker') {
       return (
         <a href={'/app/workers/' + this.props.target}>
@@ -144,13 +186,18 @@ class NavLink extends React.Component {
           {this.props.children}
         </a>
       );
+    } else if (this.props.type == 'task') {
+      return (
+        <a href={'/app/tasks/' + this.props.target}>
+          {this.props.children}
+        </a>
+      );
     } else {
       return (
         <span>{this.props.children}</span>
       )
     }
   }
-
 }
 
 class SharedTable extends React.Component {
@@ -185,7 +232,7 @@ class SharedTable extends React.Component {
   }
 }
 
-class TaskTable extends React.Component {
+class RunTable extends React.Component {
   constructor(props) {
     super(props);
     this.state = {used_cols: [
@@ -246,6 +293,89 @@ class TaskTable extends React.Component {
       case 'maximum': return item.maximum;
       case 'completed': return item.completed;
       case 'failed': return item.failed;
+      default: return 'Invalid column ' + header_name;
+    }
+  }
+
+  render() {
+    return (
+      <SharedTable
+        getColumnFormatter={this.getColumnFormatter.bind(this)}
+        used_cols={this.state.used_cols}
+        data={this.props.data}
+        title={this.props.title}
+      />
+    );
+  }
+}
+
+class TaskTable extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {used_cols: [
+      'task_name', 'internal', 'react_frontend', 'has_custom', 'active_runs',
+      'all_runs', 'dir',
+    ]};
+  }
+
+  getColumnFormatter(row_name) {
+    return {
+      id: row_name,
+      Header: props => this.getHeaderValue(row_name),
+      accessor: item => this.getColumnValue(row_name, item),
+      Cell: props => this.getColumnCell(row_name, props),
+    };
+  }
+
+  getHeaderValue(header_name) {
+    switch(header_name) {
+      case 'task_name':
+        return <span>Task Name</span>;
+      case 'internal':
+        return <span>Internal</span>;
+      case 'react_frontend':
+        return <span>Demoable</span>;
+      case 'has_custom':
+        return <span>Custom Components</span>;
+      case 'active_runs':
+        return <span>Active Runs</span>;
+      case 'all_runs':
+        return <span>Total Runs</span>;
+      case 'dir':
+        return <span>Task Directory</span>;
+      default:
+        return <span>Invalid column {header_name}</span>;
+    }
+  }
+
+  getColumnCell(header_name, props) {
+    // TODO add table row/icon for `notes` that appear on hover
+    switch(header_name) {
+      case 'task_name':
+        return <NavLink type='task' target={props.row.task_name}>
+          {props.value}
+        </NavLink>;
+      case 'internal':
+      case 'react_frontend':
+      case 'has_custom':
+        return <span>{props.value ? 'Yes' : 'No'}</span>;
+      case 'active_runs':
+      case 'all_runs':
+      case 'dir':
+      default:
+        return <span>{props.value}</span>;
+    }
+  }
+
+  getColumnValue(header_name, item) {
+    switch(header_name) {
+      case 'task_name': return item.task_name;
+      case 'internal': return item.internal;
+      case 'react_frontend': return item.react_frontend;
+      case 'has_custom': return item.has_custom;
+      case 'active_runs': return item.active_runs;
+      case 'all_runs': return item.all_runs;
+      case 'dir': return item.dir;
       default: return 'Invalid column ' + header_name;
     }
   }
@@ -596,9 +726,10 @@ class RunPanel extends React.Component {
   }
 
   renderRunInfo() {
+    let task_id = this.props.run_id.split("_").slice(0, -1).join("_");
     return (
       <div>
-        <TaskTable
+        <RunTable
           data={[this.state.data.run_details]}
           title={'Baseline info for this run'}/>
         <AssignmentTable
@@ -607,6 +738,15 @@ class RunPanel extends React.Component {
         <HitTable
           data={this.state.data.hits}
           title={'HITs from this run'}/>
+        <div>
+          <NavLink type={'run_review'} target={this.props.run_id}>
+            Review work from this run
+          </NavLink>
+          <br />
+          <NavLink type={'task_review'} target={task_id}>
+            Review work from this task
+          </NavLink>
+        </div>
       </div>
     )
   }
@@ -636,6 +776,131 @@ class RunPanel extends React.Component {
   }
 }
 
+class AssignmentFeedback extends React.Component {
+  render() {
+    let review_data = this.props.data.task.data;
+    var content = null;
+    var bsStyle = null;
+    let given_feedback = null;
+    let received_feedback = null;
+    if (!!review_data) {
+      given_feedback = review_data.given_feedback;
+      received_feedback = review_data.received_feedback;
+    }
+    if (!given_feedback && !received_feedback) {
+      content = "No feedback is associated with this assignment."
+      bsStyle = "default"
+    } else {
+      let XReviewButtons = getCorrectComponent('XReviewButtons', null);
+      let given_feedback_content = <span>No provided feedback</span>;
+      if (!!given_feedback) {
+        let init_state = {
+          'current_rating': given_feedback.rating,
+          'submitting': true,
+          'submitted': true,
+          'text': given_feedback.reason,
+          'dropdown_value': given_feedback.reason_category,
+        };
+        given_feedback_content = <XReviewButtons init_state={init_state} />;
+      }
+      let received_feedback_content = <span>No provided feedback</span>;
+      if (!!received_feedback) {
+        let init_state = {
+          'current_rating': received_feedback.rating,
+          'submitting': true,
+          'submitted': true,
+          'text': received_feedback.reason,
+          'dropdown_value': received_feedback.reason_category,
+        };
+        received_feedback_content = <XReviewButtons init_state={init_state} />;
+      }
+      content = <div>
+        <h1>Given feedback</h1>
+        {given_feedback_content}
+        <h1>Received feedback</h1>
+        {received_feedback_content}
+      </div>;
+      bsStyle = "info"
+    }
+
+    return (
+      <Panel
+        id="assignment_instruction_div"
+        bsStyle={bsStyle}
+        defaultExpanded={!!(given_feedback || received_feedback)}>
+        <Panel.Heading>
+          <Panel.Title componentClass="h3" toggle>
+            Feedback
+          </Panel.Title>
+        </Panel.Heading>
+        <Panel.Collapse>
+          <Panel.Body>
+            {content}
+          </Panel.Body>
+        </Panel.Collapse>
+      </Panel>
+    );
+  }
+}
+
+class AssignmentContext extends React.Component {
+  getContext() {
+    if (this.props.data == undefined ||
+        this.props.data.task == undefined ||
+        this.props.data.task.data == undefined ||
+        this.props.data.task.data.messages == undefined) {
+      return null;
+    }
+    let messages = this.props.data.task.data.messages;
+    let context = {};
+    for (const idx in messages) {
+      if (!isNaN(this.props.max_idx) && idx == this.props.max_idx) {
+        break;
+      }
+      let m = messages[idx];
+      if (m.task_data !== undefined) {
+        context = Object.assign(context, m.task_data);
+      }
+    }
+    return context;
+  }
+
+  render() {
+    let task_data = this.getContext();
+    let content = null;
+    let bsStyle = null;
+    let expanded = true;
+    if (task_data === null) {
+      content = "No relevant context exists for this assignment."
+      bsStyle = "default"
+      expanded = false;
+    } else {
+      let XTaskDescription = getCorrectComponent(
+        'XContextView', this.props.data.task.data.agent_id);
+      content = <XTaskDescription task_data={task_data} />;
+      bsStyle = "info"
+    }
+
+    return (
+      <Panel
+        id="task_context_div"
+        bsStyle={bsStyle}
+        defaultExpanded={expanded}>
+        <Panel.Heading>
+          <Panel.Title componentClass="h3" toggle>
+            Task Context
+          </Panel.Title>
+        </Panel.Heading>
+        <Panel.Collapse>
+          <Panel.Body>
+            {content}
+          </Panel.Body>
+        </Panel.Collapse>
+      </Panel>
+    );
+  }
+}
+
 class AssignmentInstructions extends React.Component {
   render() {
     let instructions = this.props.data;
@@ -645,15 +910,15 @@ class AssignmentInstructions extends React.Component {
       content = "No task details could be found for this assignment."
       bsStyle = "default"
     } else {
-      content = <div dangerouslySetInnerHTML={{__html: instructions}} />;
+      let XTaskDescription = getCorrectComponent('XTaskDescription', null);
+      content = <XTaskDescription task_description={instructions} />;
       bsStyle = "info"
     }
 
     return (
       <Panel
         id="assignment_instruction_div"
-        bsStyle={bsStyle}
-        style={{float: 'left', 'width': '40%'}}>
+        bsStyle={bsStyle}>
         <Panel.Heading>
           <Panel.Title componentClass="h3" toggle>
             Task Instructions
@@ -860,7 +1125,6 @@ class ReviewButtonGroup extends React.Component {
   // (which cannot be reviewed)
   constructor(props) {
     super(props);
-    console.log(this.props)
     this.handleChange = this.handleChange.bind(this);
     this.state = {
       value: this.getGivenStateVal(),
@@ -894,6 +1158,7 @@ class ReviewButtonGroup extends React.Component {
             submitting: false,
           });
           this.props.onUpdate();
+          this.props.onReview(endpoint);
         },
         (error) => {
           this.setState({
@@ -915,6 +1180,7 @@ class ReviewButtonGroup extends React.Component {
             submitting: false,
           });
           this.props.onUpdate();
+          this.props.onReview('reverse');
         },
         (error) => {
           this.setState({
@@ -1058,11 +1324,14 @@ class AssignmentReviewer extends React.Component {
   }
 
   getReviewSet() {
+    let onReview = this.props.onReview || function(review) {};
     return (
       <ReviewButtonGroup
         status={this.props.data.status}
         onUpdate={this.props.onUpdate}
-        assignment_id={this.props.data.assignment_id}/>
+        assignment_id={this.props.data.assignment_id}
+        onReview={(review) => onReview(review)}
+      />
     );
   }
 
@@ -1100,7 +1369,8 @@ class AssignmentReviewer extends React.Component {
 
   render() {
     var panel_body;
-    if (this.props.data.world_status != 'done') {
+    if (this.props.data.world_status != 'done' &&
+        this.props.data.world_status != 'partner disconnect') {
       panel_body = <span>Cannot review until the world is done.</span>;
     } else {
       var review_set = this.getReviewSet();
@@ -1152,15 +1422,23 @@ class AssignmentReviewer extends React.Component {
 class AssignmentView extends React.Component {
   constructor(props) {
     super(props);
+    let task_name = props.data.task_name;
+    import(
+      /* webpackMode: "eager" */
+      `./task_components/${task_name}/components/custom.jsx`
+    ).then((custom) => {
+      this.props.setCustomComponents(custom.default);
+    }).catch((error) => {
+      console.log('No custom components found');
+      this.props.setCustomComponents({});
+    });
   }
 
   getOnboardingChat() {
     let onboard_data = this.props.data.onboarding;
     if (onboard_data === null) {
       return (
-        <Panel
-          id="message_display_div_onboarding"
-          style={{float: 'right', 'width': '58%'}}>
+        <Panel id="message_display_div_onboarding">
           <Panel.Heading>
             <Panel.Title componentClass="h3" toggle>
               Onboarding Chat Window
@@ -1213,16 +1491,17 @@ class AssignmentView extends React.Component {
         <ChatDisplay
           messages={messages}
           agent_id={agent_id}
-          is_onboarding={is_onboarding}/>
+          is_onboarding={is_onboarding}
+          onUpdateContext={this.props.onUpdateContext}
+        />
       );
     }
   }
 
   render() {
-    console.log(this.props.data);
-    var data = this.props.data;
-    var onboarding_chat_window = this.getOnboardingChat();
-    var task_chat_window = this.getTaskChat(this.props.data.task, false);
+    let data = this.props.data;
+    let onboarding_chat_window = this.getOnboardingChat();
+    let task_chat_window = this.getTaskChat(this.props.data.task, false);
     return (
       <div>
         {onboarding_chat_window}
@@ -1235,7 +1514,10 @@ class AssignmentView extends React.Component {
 class AssignmentPanel extends React.Component {
   constructor(props) {
     super(props);
-    this.state = {assignment_loading: true, items: null, error: false};
+    this.state = {
+      assignment_loading: true, items: null, error: false,
+      custom_components: {}, max_idx: null,
+    };
   }
 
   fetchRunData() {
@@ -1257,25 +1539,53 @@ class AssignmentPanel extends React.Component {
       )
   }
 
+  componentDidUpdate(prevProps) {
+    if (this.props.assignment_id !== prevProps.assignment_id) {
+      this.fetchRunData();
+    }
+  }
+
   componentDidMount() {
     this.setState({assignment_loading: true});
     this.fetchRunData();
   }
 
   renderAssignmentInfo() {
+    // TODO move task instructions and context into separate panels for
+    // task and onboarding
     return (
       <div>
         <AssignmentTable
           data={[this.state.data.assignment_details]}
           title={'State info for this assignment'}/>
-        <AssignmentInstructions
-          data={[this.state.data.assignment_instructions]}/>
-        <AssignmentView
-          data={this.state.data.assignment_content}
-          title={'Assignment Content'}/>
+        <div id='left-assign-pane' style={{float: 'left', 'width': '40%'}}>
+          <AssignmentInstructions
+            data={this.state.data.assignment_instructions}
+            custom_components={this.state.custom_components}/>
+          <AssignmentContext
+            data={this.state.data.assignment_content}
+            custom_components={this.state.custom_components}
+            max_idx={this.state.max_idx}/>
+          <AssignmentFeedback
+            data={this.state.data.assignment_content}
+            custom_components={this.state.custom_components}/>
+        </div>
+        <div id='right-assign-pane' style={{float: 'right', 'width': '58%'}}>
+          <AssignmentView
+            data={this.state.data.assignment_content}
+            title={'Assignment Content'}
+            onUpdateContext={(idx) => this.setState({max_idx: idx})}
+            custom_components={this.state.custom_components}
+            setCustomComponents={(module) => {
+              setCustomComponents(module);
+              this.setState({custom_components: module});
+            }}/>
+        </div>
         <AssignmentReviewer
           data={this.state.data.assignment_details}
-          onUpdate={() => this.fetchRunData()}/>
+          onUpdate={() => this.fetchRunData()}
+          onReview={this.props.onReview}
+        />
       </div>
     )
   }
@@ -1306,6 +1616,319 @@ class AssignmentPanel extends React.Component {
         </Panel.Body>
       </Panel>
     )
+  }
+}
+
+class ReviewPanel extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      assignments_loading: true, error: false,
+      custom_components: {}, current_worker: null, ordering: 'default',
+      workers_remaining: [], assignments_remaining: 0,
+      assignments_by_worker: {}, current_assignment: null,
+      current_worker_stats: {'approved': 0, 'rejected': 0, 'remain': 0},
+    };
+  }
+
+  parseRawRuns(run_datas) {
+    // Get reviewable assignments
+    let assignments = []
+    let worker_information = {}
+    for (const idx in run_datas) {
+      assignments = assignments.concat(run_datas[idx].assignments);
+      worker_information = Object.assign(
+        worker_information, run_datas[idx].worker_details);
+    }
+    let assignments_remaining = 0;
+    let reviewable_assigns = assignments.filter(
+      assign => assign.status == 'Reviewable'
+    );
+    // Bucket assignments by worker
+    let assignments_by_worker = {};
+    for (const idx in reviewable_assigns) {
+      let assign = reviewable_assigns[idx];
+      if (assignments_by_worker[assign.worker_id] == undefined) {
+        assignments_by_worker[assign.worker_id] = {
+          assigns: [], bad_feedback: false, worker_id: assign.worker_id,
+          worker_data: worker_information[assign.worker_id],
+        };
+      }
+
+      assignments_remaining += 1;
+      if (!!assign.received_feedback && assign.received_feedback.rating < 3) {
+        // Feedback below 3 was rated as "below average",
+        // so we want to prioritize it as important to see
+        assignments_by_worker[assign.worker_id].bad_feedback = true;
+        assignments_by_worker[assign.worker_id].assigns.unshift(assign);
+      } else {
+        assignments_by_worker[assign.worker_id].assigns.push(assign);
+      }
+    }
+
+    // make an array to determine order to work through workers
+    let workers_left_order = Object.values(assignments_by_worker);
+
+    // Sort workers by the current ordering
+    let sortByAmount = (w1, w2) => w2.assigns.length - w1.assigns.length;
+    let sortByFeedback = (w1, w2) => (+w2.bad_feedback) - (+w1.bad_feedback);
+
+    let sortOrders = {
+      default: [sortByFeedback, sortByAmount],
+    }
+    let sortOrder = sortOrders[this.state.ordering];
+    let sortFn = (w1, w2) => {
+      let res = 0;
+      for (const idx in sortOrder) {
+        let useSort = sortOrder[idx];
+        res = useSort(w1, w2);
+        if (res != 0) {
+          return res;
+        }
+      }
+      return 0;
+    };
+    workers_left_order.sort(sortFn);
+    let workers_remaining = workers_left_order.map((w) => w.worker_id);
+    let current_worker = workers_remaining.shift();
+    let current_worker_stats = {
+      'approved': assignments_by_worker[current_worker].worker_data.approved,
+      'rejected': assignments_by_worker[current_worker].worker_data.rejected,
+      'remain': assignments_by_worker[current_worker].assigns.length
+    }
+    this.setState({
+      current_worker: current_worker,
+      workers_remaining: workers_remaining,
+      assignments_remaining: assignments_remaining,
+      assignments_by_worker: assignments_by_worker,
+      current_worker_stats: current_worker_stats,
+    })
+  }
+
+  fetchDataForRuns(run_ids) {
+    Promise.all(run_ids.map(run_id =>
+      fetch('/runs/' + run_id).then(resp => resp.json())
+    )).then(task_datas => {
+        this.parseRawRuns(task_datas);
+        this.setState({
+          assignments_loading: false,
+          run_data: task_datas
+        });
+    }, (error) => {
+      this.setState({
+        assignments_loading: false,
+        error: error
+      });
+    });
+  }
+
+  fetchAllRunData() {
+    fetch('/run_list')
+      .then(res => res.json())
+      .then(
+        (result) => {
+          let task_id = this.props.task_id;
+          let run_ids = result.map((x) => x.run_id);
+          let task_runs = run_ids.filter((run_id) => run_id.startsWith(task_id));
+          this.fetchDataForRuns(task_runs);
+        },
+        (error) => {
+          this.setState({
+            assignments_loading: false,
+            error: error
+          });
+        }
+      )
+  }
+
+  componentDidMount() {
+    this.setState({assignments_loading: true});
+    if (this.props.run_id) {
+      this.fetchDataForRuns([this.props.run_id]);
+    } else {
+      this.fetchAllRunData();
+    }
+  }
+
+  handleReview(review) {
+    // Update worker stats to reflect the type of review, then move to the
+    // next assignment
+    let worker_stats = this.state.current_worker_stats;
+    let assignments_remaining = this.state.assignments_remaining;
+    if (review == 'approve') {
+      worker_stats.approved += 1;
+      worker_stats.remain -= 1;
+      assignments_remaining -= 1;
+    } else if (review == 'reject') {
+      worker_stats.rejected += 1;
+      worker_stats.remain -= 1;
+      assignments_remaining -= 1;
+    } else if (review == 'reverse') {
+      worker_stats.approved += 1;
+      worker_stats.rejected -= 1;
+    }
+    this.setState({
+      current_worker_stats: worker_stats,
+      assignments_remaining: assignments_remaining,
+    });
+    this.nextAssignment();
+  }
+
+  nextAssignment() {
+    // Load the next valid assignment, selecting a new current worker if
+    // the current worker has no more assignments to review
+    let worker_stats = this.state.current_worker_stats;
+    let current_worker = this.state.current_worker;
+    if (worker_stats.remain == 0) {
+      current_worker = this.nextWorker();
+    }
+
+    let assignments = this.state.assignments_by_worker[current_worker].assigns;
+    let current_assignment = assignments.shift();
+    if (current_assignment) {
+      current_assignment = current_assignment.assignment_id;
+    }
+    this.setState({
+      current_assignment: current_assignment,
+      assignments_by_worker: this.state.assignments_by_worker,
+    });
+  }
+
+  nextWorker() {
+    // Move to the next worker in the remaining workers list
+    let current_worker = this.state.workers_remaining.shift();
+    let current_worker_state = this.state.assignments_by_worker[current_worker];
+    let current_worker_stats = {
+      'approved': current_worker_state.worker_data.approved,
+      'rejected': current_worker_state.worker_data.rejected,
+      'remain': current_worker_state.assigns.length
+    }
+    this.setState({
+      current_worker: current_worker,
+      current_worker_stats: current_worker_stats,
+      workers_remaining: this.state.workers_remaining,
+    });
+
+    return current_worker;
+  }
+
+  approveAssignment(assign_id) {
+    postData('/approve/' + assign_id)
+      .then(res => res.json())
+      .then(
+        (result) => {console.log(assign_id + ' approved')},
+        (error) => {
+          this.setState({
+            submitting: false,
+          });
+          console.log(error);
+          window.alert('Submitting review failed. Error logged to console');
+        }
+      )
+  }
+
+  approveAllForWorker() {
+    let current_worker = this.state.current_worker;
+    let assignments = this.state.assignments_by_worker[current_worker].assigns;
+    let current_assignment = this.state.current_assignment;
+    this.approveAssignment(current_assignment);
+    let total_assigns = 1 + assignments.length;
+    while (assignments.length > 0) {
+        current_assignment = assignments.shift();
+        this.approveAssignment(current_assignment.assignment_id);
+    }
+    this.setState({
+      assignments_by_worker: this.state.assignments_by_worker,
+      assignments_remaining: this.state.assignments_remaining - total_assigns,
+    });
+    this.state.current_worker_stats.remain = 0;
+    this.nextAssignment();
+  }
+
+  getReviewOverview() {
+    let worker_stats = this.state.current_worker_stats;
+    let current_worker = this.state.current_worker;
+    let workers_remaining = this.state.workers_remaining;
+    let assignments_remaining = this.state.assignments_remaining;
+
+    let action_button = null;
+    if (this.state.current_assignment == null) {
+      action_button = <Button
+        bsStyle="primary"
+        onClick={() => this.nextAssignment()}>
+        Get Started!
+      </Button>
+    } else if (worker_stats.approved > 0){
+      action_button = <div>
+        <Button
+          bsStyle="primary"
+          onClick={() => this.approveAllForWorker()}>
+          Approve Rest For Worker
+        </Button>
+      </div>
+    }
+
+    let header_text = null;
+    if (this.props.run_id) {
+      header_text = "Reviews toolbar for run " + this.props.run_id;
+    } else {
+      header_text = "Reviews toolbar for task " + this.props.task_id;
+    }
+    return (
+      <Panel
+        id="review_overview_panel"
+        bsStyle="primary">
+        <Panel.Heading>
+          <Panel.Title componentClass="h3">
+            {header_text}
+          </Panel.Title>
+        </Panel.Heading>
+        <Panel.Body>
+          <p>
+            Current worker: {current_worker}
+          </p>
+          <p>
+            Worker stats:
+            Approved - {worker_stats.approved} |
+            Rejected - {worker_stats.rejected} |
+            Remaining - {worker_stats.remain}
+          </p>
+          <p>
+            Workers remaining: {workers_remaining.length}
+          </p>
+          <p>
+            Total Assignments remaining: {assignments_remaining}
+          </p>
+          {action_button}
+        </Panel.Body>
+      </Panel>
+    );
+  }
+
+  render() {
+    let content = <div> Loading... </div>;
+    if (this.state.assignments_loading == false) {
+      let assign_view = null;
+      if (this.state.current_assignment != null) {
+        assign_view = (
+          <AssignmentPanel
+            assignment_id={this.state.current_assignment}
+            onReview={(review) => this.handleReview(review)}
+          />
+        );
+      }
+      content = (
+        <div>
+          {this.getReviewOverview()}
+          {assign_view}
+        </div>
+      )
+    }
+    return (
+      <div>
+        {content}
+      </div>
+    );
   }
 }
 
@@ -1377,6 +2000,62 @@ class WorkerPanel extends React.Component {
   }
 }
 
+class RunListPanel extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {tasks_loading: true, items: null, error: false};
+  }
+
+  fetchRunData() {
+    fetch('/run_list')
+      .then(res => res.json())
+      .then(
+        (result) => {
+          this.setState({
+            tasks_loading: false,
+            items: result
+          });
+        },
+        (error) => {
+          this.setState({
+            tasks_loading: false,
+            error: error
+          });
+        }
+      )
+  }
+
+  componentDidMount() {
+    this.setState({tasks_loading: true});
+    this.fetchRunData();
+  }
+
+  render() {
+    var content;
+    if (this.state.tasks_loading) {
+      content = <span>Runs are currently loading...</span>;
+    } else if (this.state.error !== false) {
+      console.log(this.state.error)
+      content = <span>Runs loading failed...</span>;
+    } else {
+      content = <RunTable data={this.state.items} title={'Local Runs'}/>;
+    }
+
+    return (
+      <Panel>
+        <Panel.Heading>
+          <Panel.Title componentClass="h3">
+            Running Task List
+          </Panel.Title>
+        </Panel.Heading>
+        <Panel.Body>
+          {content}
+        </Panel.Body>
+      </Panel>
+    )
+  }
+}
+
 class TaskListPanel extends React.Component {
   constructor(props) {
     super(props);
@@ -1384,7 +2063,7 @@ class TaskListPanel extends React.Component {
   }
 
   fetchTaskData() {
-    fetch('/tasks')
+    fetch('/task_list')
       .then(res => res.json())
       .then(
         (result) => {
@@ -1415,14 +2094,14 @@ class TaskListPanel extends React.Component {
       console.log(this.state.error)
       content = <span>Tasks loading failed...</span>;
     } else {
-      content = <TaskTable data={this.state.items} title={'Local Runs'}/>;
+      content = <TaskTable data={this.state.items} title={'Discovered Tasks'}/>;
     }
 
     return (
       <Panel>
         <Panel.Heading>
           <Panel.Title componentClass="h3">
-            Running Tasks List
+            All Tasks List
           </Panel.Title>
         </Panel.Heading>
         <Panel.Body>
@@ -1493,6 +2172,284 @@ class WorkerListPanel extends React.Component {
   }
 }
 
+class DemoTaskPanel extends React.Component {
+  _socket = null;
+
+  constructor(props) {
+    super(props);
+    this.state = {
+      run_id: null,
+      task_loading: true,
+      error: false,
+      volume: 0,
+      worker_data: {},
+      workers: [],
+      active_worker: 0,
+      connected: false,
+    };
+  }
+
+  componentDidMount() {
+    this.startTask();
+    this.connectSocket();
+  }
+
+  componentDidUpdate(prevProps, prevState, snapshot) {
+    if (this.state.active_worker != prevState.active_worker) {
+      $('div#message-pane-segment').animate({
+        scrollTop: $('div#message-pane-segment').get(0).scrollHeight
+      }, 500);
+      $("input#id_text_input").focus();
+    }
+  }
+
+  _handleMessage(evt) {
+    let msg = JSON.parse(evt.data);
+    if (msg.command == 'sync') {
+      this.handleNewData(msg);
+    }
+  }
+
+  connectSocket() {
+    if (this._socket) {
+      return;
+    }
+    var url = window.location;
+    var ws_protocol = null;
+    if (url.protocol == "https:") {
+      ws_protocol = 'wss';
+    } else {
+      ws_protocol = 'ws';
+    }
+
+    var socket = new WebSocket(ws_protocol + '://' + url.host + '/socket');
+
+    socket.onmessage = (evt) => this._handleMessage(evt);
+
+    socket.onopen = () => {
+      this.setState({connected: true});
+    };
+
+    socket.onerror = socket.onclose = () => {
+      this.setState({connected: false}, function () {
+        this._socket = null;
+      });
+    };
+
+    this._socket = socket;
+  }
+
+  startTask() {
+    // Send a launch task request to the server, unpack the resulting
+    // task config and pull the custom frontend for the task.
+    this.setState({submitting: true});
+    postData('/run_task/' + this.props.task_id)
+      .then(res => res.json())
+      .then(
+        (result) => {
+          this.handleNewData(result);
+          import(
+            /* webpackMode: "eager" */
+            `./task_components/${this.props.task_id}/components/custom.jsx`
+          ).then((custom) => {
+            setCustomComponents(custom.default);
+            if (result.task_config.frame_height === undefined) {
+              result.task_config.frame_height = 650;
+            }
+            this.setState({
+              task_loading: false, task_config: result.task_config});
+          }).catch((err) => {
+            // Custom react module not found
+            if (result.task_config.frame_height === undefined) {
+              result.task_config.frame_height = 650;
+            }
+            this.setState({
+              task_loading: false, task_config: result.task_config});
+          });
+        },
+        (error) => {
+          this.setState({
+            task_loading: false,
+            error: error,
+          });
+          console.log(error);
+          window.alert('Starting demo task failed. Error logged to console');
+        }
+      );
+  }
+
+  handleNewData(result) {
+    // Unpack data from an array of the return value of
+    // MockTurkAgent.get_update_packet()
+    let worker_names = result.data.map((w) => w.worker_id);
+    let curr_worker_data = this.state.worker_data;
+    result.data.map((w) => {
+      if (curr_worker_data[w.worker_id] === undefined) {
+        curr_worker_data[w.worker_id] = {
+          task_done: false,
+          done_text: null,
+          chat_state: 'waiting',
+          messages: [],
+          agent_id: null,
+          context: {},
+          world_state: null,
+          worker_id: w.worker_id,
+          task_data: {},
+        };
+      }
+      let chat_state = 'waiting';
+      if (w.task_done) {
+        chat_state = 'done';
+      } else if (w.wants_message) {
+        chat_state = 'text_input';
+      }
+      let curr_worker = curr_worker_data[w.worker_id];
+      curr_worker.messages = curr_worker.messages.concat(w.new_messages);
+      for (const idx in w.new_messages) {
+        let m = w.new_messages[idx];
+        if (m.task_data !== undefined) {
+          m.task_data.last_update = (new Date()).getTime();
+          curr_worker.task_data = Object.assign(
+            curr_worker.task_data, m.task_data);
+        }
+      }
+      curr_worker.task_done = w.task_done;
+      curr_worker.done_text = w.done_text;
+      curr_worker.world_state = w.status;
+      curr_worker.chat_state = chat_state;
+      curr_worker.agent_id = w.agent_id;
+      if (w.all_messages.length > curr_worker.messages.length) {
+        // If somehow the messages got out of sync, just grab the full message
+        // list. This isn't great to do all the time (as then messages would
+        // need to wait to be recieved by the server before we could even
+        // display them. This also solves eventual 'refresh' issues)
+        curr_worker.messages = w.all_messages;
+        curr_worker.task_data = {};
+        for (const idx in w.all_messages) {
+          let m = w.all_messages[idx];
+          if (m.task_data !== undefined) {
+            m.task_data.last_update = (new Date()).getTime();
+            curr_worker.task_data = Object.assign(
+              curr_worker.task_data, m.task_data);
+          }
+        }
+      }
+    });
+    this.setState({workers: worker_names, worker_data: curr_worker_data})
+  }
+
+  sendMessage(message, task_data, callback, worker) {
+    let msg = JSON.stringify(
+      {'text': message, 'task_data': task_data,
+       'sender': worker.worker_id, 'id': worker.agent_id});
+    this._socket.send(msg);
+    worker.messages.push({
+      id: worker.agent_id,
+      text: message,
+      task_data: task_data,
+      message_id: (new Date()).getTime(),
+      is_review: false,
+    });
+    worker.wants_message = false;
+    worker.chat_state = 'waiting';
+    this.setState({worker_data: this.state.worker_data});
+    callback();
+  }
+
+  renderSingleTaskPanel(worker_id) {
+    let worker = this.state.worker_data[worker_id];
+    let task_config = this.state.task_config;
+    return (
+      <div style={{height: task_config.frame_height}}>
+        <BaseFrontend
+          task_done={worker.task_done}
+          done_text={worker.done_text}
+          chat_state={worker.chat_state}
+          onMessageSend={(m, d, c) => this.sendMessage(m, d, c, worker)}
+          socket_status={'connected'}
+          messages={worker.messages}
+          agent_id={worker.agent_id}
+          task_description={task_config.task_description}
+          initialization_status={'done'}
+          is_cover_page={false}
+          frame_height={task_config.frame_height}
+          task_data={worker.task_data}
+          world_state={worker.world_state}
+          v_id={worker.agent_id}
+          allDoneCallback={() => console.log('all done called')}
+          volume={this.state.volume}
+          onVolumeChange={(v) => this.setState({volume: v})}
+        />
+      </div>
+    );
+  }
+
+  renderTaskPanel() {
+    let nav_items = this.state.workers.map((agent_id, idx) => {
+      return (
+        <NavItem
+          eventKey={idx}
+          key={agent_id + '-selector'}
+          title={'View as ' + agent_id}>
+          {agent_id}
+        </NavItem>
+      )
+    });
+    let task_panels = this.state.workers.map((agent_id, idx) => {
+      let display = null;
+      if (idx != this.state.active_worker) {
+        display = {display: 'none'}
+      }
+      return (
+        <div style={display} key={agent_id + '-task-display'}>
+          {this.renderSingleTaskPanel(this.state.workers[idx])}
+        </div>
+      )
+    });
+    // Active panel must be first in the array for jquery to target properly
+    let front_panel = task_panels.splice(this.state.active_worker, 1)
+    task_panels.unshift(front_panel);
+    return (
+      <div>
+        <Nav
+          bsStyle="tabs"
+          justified
+          activeKey={this.state.active_worker}
+          onSelect={key => this.setState({active_worker: key})}
+        >
+          {nav_items}
+        </Nav>
+        {task_panels}
+      </div>
+    );
+  }
+
+  render() {
+    var content;
+    if (this.state.task_loading) {
+      content = <span>Task data is currently loading...</span>;
+    } else if (this.state.error !== false) {
+      console.log(this.state.error)
+      content = <span>Task loading failed...</span>;
+    } else {
+      content = this.renderTaskPanel();
+    }
+
+    return (
+      <Panel>
+        <Panel.Heading>
+          <Panel.Title componentClass="h3">
+            Demo task for {this.props.task_id}
+          </Panel.Title>
+        </Panel.Heading>
+        <Panel.Body>
+          {content}
+        </Panel.Body>
+      </Panel>
+    )
+  }
+}
+
 class MainApp extends React.Component {
   constructor(props) {
     super(props);
@@ -1505,7 +2462,7 @@ class MainApp extends React.Component {
         <span>Welcome to the ParlAI-Dashboard. Use the button to begin</span>
         <Button
           bsStyle="info"
-          href="/app/tasks">
+          href="/app/home">
             Click me
         </Button>
       </div>
@@ -1518,7 +2475,7 @@ class MainApp extends React.Component {
         <span>Oops something happened! use this button to return </span>
         <Button
           bsStyle="info"
-          href="/app/tasks">
+          href="/app/home">
             Click me
         </Button>
       </div>
@@ -1526,12 +2483,45 @@ class MainApp extends React.Component {
   }
 
   renderTaskPage() {
+    // View should show runs of this task and datasets related to it. Should
+    // also have a demo of the task at the bottom
+    let run_task_list = null;
+    return (
+      <div style={{width: '100%'}}>
+        {run_task_list}
+        <DemoTaskPanel task_id = {this.state.args[0]} />
+      </div>
+    )
+  }
+
+  renderHomePage() {
     return (
       <div style={{width: '900px'}}>
-        <TaskListPanel/>
+        <RunListPanel/>
         <WorkerListPanel/>
+        <TaskListPanel />
       </div>
     );
+  }
+
+  renderReviewPage() {
+    let review_type = this.state.args[0];
+    let target = this.state.args[1];
+    if (review_type == 'run') {
+      return (
+        <div>
+          <ReviewPanel run_id={target}/>
+        </div>
+      );
+    } else if (review_type == 'task') {
+      return (
+        <div>
+          <ReviewPanel task_id={target}/>
+        </div>
+      );
+    } else {
+      return this.renderUnsupportedPage();
+    }
   }
 
   renderWorkerPage() {
@@ -1561,14 +2551,18 @@ class MainApp extends React.Component {
   render() {
     if (this.state.url_state == AppURLStates.init) {
       return this.renderInitPage();
-    } else if (this.state.url_state == AppURLStates.tasks) {
-      return this.renderTaskPage();
+    } else if (this.state.url_state == AppURLStates.home) {
+      return this.renderHomePage();
     } else if (this.state.url_state == AppURLStates.runs) {
       return this.renderRunPage();
     } else if (this.state.url_state == AppURLStates.assignments) {
       return this.renderAssignmentPage();
     } else if (this.state.url_state == AppURLStates.workers) {
       return this.renderWorkerPage();
+    } else if (this.state.url_state == AppURLStates.tasks) {
+      return this.renderTaskPage();
+    } else if (this.state.url_state == AppURLStates.review) {
+      return this.renderReviewPage();
     } else {
       return this.renderUnsupportedPage();
     }
